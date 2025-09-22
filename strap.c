@@ -8,17 +8,35 @@
 /* Safe reading */
 char *afgets(FILE *f)
 {
-    char *line = NULL;
-    size_t len = 0;
-    ssize_t read;
+    size_t bufsize = 128;
+    char *line = malloc(bufsize);
+    if (!line) return NULL;
 
-    if ((read = getline(&line, &len, f)) != -1)
-    {
-        // Remove newline if present
-        if (read > 0 && line[read - 1] == '\n')
-        {
-            line[read - 1] = '\0';
+    size_t len = 0;
+    char *ptr = line;
+
+    while (fgets(ptr, bufsize - len, f)) {
+        size_t read_len = strlen(ptr);
+        len += read_len;
+
+        if (len > 0 && ptr[read_len - 1] == '\n') {
+            // Found newline, remove it
+            ptr[read_len - 1] = '\0';
+            return line;
         }
+
+        // Need more space
+        bufsize *= 2;
+        char *new_line = realloc(line, bufsize);
+        if (!new_line) {
+            free(line);
+            return NULL;
+        }
+        line = new_line;
+        ptr = line + len;
+    }
+
+    if (len > 0) {
         return line;
     }
     free(line);
