@@ -10,16 +10,19 @@ char *afgets(FILE *f)
 {
     size_t bufsize = 128;
     char *line = malloc(bufsize);
-    if (!line) return NULL;
+    if (!line)
+        return NULL;
 
     size_t len = 0;
     char *ptr = line;
 
-    while (fgets(ptr, bufsize - len, f)) {
+    while (fgets(ptr, bufsize - len, f))
+    {
         size_t read_len = strlen(ptr);
         len += read_len;
 
-        if (len > 0 && ptr[read_len - 1] == '\n') {
+        if (len > 0 && ptr[read_len - 1] == '\n')
+        {
             // Found newline, remove it
             ptr[read_len - 1] = '\0';
             return line;
@@ -28,7 +31,8 @@ char *afgets(FILE *f)
         // Need more space
         bufsize *= 2;
         char *new_line = realloc(line, bufsize);
-        if (!new_line) {
+        if (!new_line)
+        {
             free(line);
             return NULL;
         }
@@ -36,7 +40,8 @@ char *afgets(FILE *f)
         ptr = line + len;
     }
 
-    if (len > 0) {
+    if (len > 0)
+    {
         return line;
     }
     free(line);
