@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: [ main ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ main ]
 
@@ -40,3 +42,30 @@ jobs:
         cd tests
         gcc -I.. -L.. -o test_strap.exe test_strap.c -lstrap
         ./test_strap.exe
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release artifacts
+        run: |
+          make clean
+          make
+
+      - name: Package release artifacts
+        run: |
+          mkdir -p dist
+          tar -czf dist/strap-${{ github.ref_name }}.tar.gz libstrap.a strap.h
+          zip -j dist/strap-${{ github.ref_name }}.zip libstrap.a strap.h
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist/strap-${{ github.ref_name }}.tar.gz
+            dist/strap-${{ github.ref_name }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
