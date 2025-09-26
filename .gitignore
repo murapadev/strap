@@ -30,3 +30,6 @@ Thumbs.db
 # Test executables
 tests/test_strap
 tests/test_strap.exe
+
+# Benchmark executables
+benchmarks/strap_bench

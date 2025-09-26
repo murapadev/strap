@@ -23,7 +23,18 @@ make
 
 # Install (optional)
 sudo make install
+
+# Benchmarks (optional)
+make bench
+./benchmarks/strap_bench
 ```
+
+## 🔔 What's New in v0.2
+
+- Faster joins and file reads through tighter allocation strategies
+- New helpers: `strstartswith`, `strendswith`, and `strreplace`
+- Unified error reporting via `strap_last_error()` and `strap_error_string()`
+- Scriptable micro-benchmarks with `make bench`
 
 ### Basic Usage
 
@@ -57,21 +68,34 @@ int main(void) {
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
+## ⚠️ Error Handling
+
+All STRAP APIs set a thread-local error code. On failure, query the cause:
+
+```c
+char *trimmed = strtrim(raw_line);
+if (!trimmed) {
+    fprintf(stderr, "STRAP error: %s\n", strap_error_string(strap_last_error()));
+    return EXIT_FAILURE;
+}
+```
+
+Call `strap_clear_error()` when you want to reset the status manually.
+
 ## 🗺️ Roadmap
 
-### v0.1 (Current) ✅
+### v0.2 (Current) ✅
 
-- [x] Core string and time utilities
-- [x] Cross-platform compatibility
-- [x] Comprehensive testing
-- [x] CI/CD pipeline
+- [x] Performance optimizations
+- [x] Additional string utilities
+- [x] Enhanced error handling
+- [x] Benchmark suite
 
-### v0.2 (Upcoming)
+### v0.3 (Planned)
 
-- [ ] Performance optimizations
-- [ ] Additional string utilities
-- [ ] Enhanced error handling
-- [ ] Benchmark suite
+- [ ] Extended locale-aware helpers
+- [ ] Optional arena allocator for transient strings
+- [ ] Timezone-aware time helpers
 
 ## 📄 License
 
