@@ -33,3 +33,5 @@ tests/test_strap.exe
 
 # Benchmark executables
 benchmarks/strap_bench
+
+strap.wiki/*

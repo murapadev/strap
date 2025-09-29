@@ -91,11 +91,11 @@ Call `strap_clear_error()` when you want to reset the status manually.
 - [x] Enhanced error handling
 - [x] Benchmark suite
 
-### v0.3 (Planned)
+### v0.3 (In Progress)
 
-- [ ] Extended locale-aware helpers
-- [ ] Optional arena allocator for transient strings
-- [ ] Timezone-aware time helpers
+- [x] Extended locale-aware helpers
+- [x] Optional arena allocator for transient strings
+- [x] Timezone-aware time helpers
 
 ## 📄 License
 

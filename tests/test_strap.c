@@ -169,6 +169,104 @@ void test_timeval()
     printf("timeval tests passed\n");
 }
 
+void test_locale_helpers()
+{
+    strap_clear_error();
+    char *lower = strtolower_locale("HELLO", "C");
+    assert(lower && strcmp(lower, "hello") == 0);
+    free(lower);
+
+    strap_clear_error();
+    char *upper = strtoupper_locale("strap", NULL);
+    assert(upper && strcmp(upper, "STRAP") == 0);
+    free(upper);
+
+    strap_clear_error();
+    int cmp = strcasecmp_locale("StraP", "strap", "C");
+    assert(cmp == 0);
+    assert(strap_last_error() == STRAP_OK);
+
+    strap_clear_error();
+    cmp = strcoll_locale("abc", "abd", NULL);
+    assert(cmp < 0);
+
+    strap_clear_error();
+    char *invalid = strtolower_locale(NULL, NULL);
+    assert(!invalid);
+    assert(strap_last_error() == STRAP_ERR_INVALID_ARGUMENT);
+
+    printf("locale helper tests passed\n");
+}
+
+void test_arena_allocator()
+{
+    strap_arena_t *arena = strap_arena_create(0);
+    assert(arena);
+
+    const char *parts[] = {"a", "b", "c"};
+    char *joined = strjoin_arena(arena, parts, 3, "-");
+    assert(joined && strcmp(joined, "a-b-c") == 0);
+
+    char *trimmed = strtrim_arena(arena, "  hello  ");
+    assert(trimmed && strcmp(trimmed, "hello") == 0);
+
+    char *replaced = strreplace_arena(arena, "foofoo", "foo", "bar");
+    assert(replaced && strcmp(replaced, "barbar") == 0);
+
+    char *upper = strtoupper_locale_arena(arena, "abc", "C");
+    assert(upper && strcmp(upper, "ABC") == 0);
+
+    void *mem = strap_arena_alloc(arena, 16);
+    assert(mem);
+
+    strap_arena_clear(arena);
+    mem = strap_arena_alloc(arena, 8);
+    assert(mem);
+
+    strap_arena_destroy(arena);
+    printf("arena allocator tests passed\n");
+}
+
+void test_timezone_helpers()
+{
+    strap_clear_error();
+    char buffer[64];
+    assert(strap_time_offset_to_string(0, buffer, sizeof(buffer)) == 0);
+    assert(strcmp(buffer, "Z") == 0);
+
+    strap_clear_error();
+    assert(strap_time_offset_to_string(330, buffer, sizeof(buffer)) == 0);
+    assert(strcmp(buffer, "+05:30") == 0);
+
+    strap_clear_error();
+    int offset = 0;
+    assert(strap_time_parse_tz_offset("-03:00", &offset) == 0);
+    assert(offset == -180);
+
+    strap_clear_error();
+    assert(strap_time_parse_tz_offset("+01", &offset) == 0);
+    assert(offset == 60);
+
+    strap_clear_error();
+    struct timeval tv = {0, 0};
+    assert(strap_time_format_iso8601(tv, 0, buffer, sizeof(buffer)) == 0);
+    assert(strcmp(buffer, "1970-01-01T00:00:00Z") == 0);
+
+    strap_clear_error();
+    struct timeval tv_micro = {0, 123456};
+    assert(strap_time_format_iso8601(tv_micro, 60, buffer, sizeof(buffer)) == 0);
+    assert(strcmp(buffer, "1970-01-01T01:00:00.123456+01:00") == 0);
+
+    strap_clear_error();
+    struct timeval parsed;
+    int parsed_offset = 0;
+    assert(strap_time_parse_iso8601("1970-01-01T01:00:00.123456+01:00", &parsed, &parsed_offset) == 0);
+    assert(parsed.tv_sec == 0 && parsed.tv_usec == 123456);
+    assert(parsed_offset == 60);
+
+    printf("timezone helper tests passed\n");
+}
+
 int main()
 {
     test_strtrim();
@@ -178,6 +276,9 @@ int main()
     test_strstartswith_and_strendswith();
     test_strreplace();
     test_timeval();
+    test_locale_helpers();
+    test_arena_allocator();
+    test_timezone_helpers();
 
     printf("All tests passed!\n");
     return 0;
