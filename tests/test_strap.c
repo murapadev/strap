@@ -256,16 +256,16 @@ void test_line_buffer()
 
     char *line = strap_line_buffer_read(tmp, &buffer);
     assert(line && strcmp(line, "first line") == 0);
-    char *buffer_ptr = line;
+    assert(line == buffer.data);
     assert(strap_last_error() == STRAP_OK);
 
     line = strap_line_buffer_read(tmp, &buffer);
-    assert(line == buffer_ptr);
+    assert(line == buffer.data);
     assert(strcmp(line, long_line) == 0);
     assert(strap_last_error() == STRAP_OK);
 
     line = strap_line_buffer_read(tmp, &buffer);
-    assert(line == buffer_ptr);
+    assert(line == buffer.data);
     assert(strcmp(line, "trailing-no-newline") == 0);
     assert(strap_last_error() == STRAP_OK);
 
