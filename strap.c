@@ -10,6 +10,23 @@
 #include <string.h>
 #include <time.h>
 
+#if defined(_MSC_VER)
+#    include <intrin.h>
+#endif
+
+#if defined(__SSE2__) || (defined(_MSC_VER) && (defined(_M_X64) || defined(_M_AMD64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)))
+#    define STRAP_HAVE_SSE2 1
+#    include <emmintrin.h>
+#else
+#    define STRAP_HAVE_SSE2 0
+#endif
+
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__DragonFly__) || defined(__linux__)
+#    define STRAP_HAVE_TM_GMTOFF 1
+#else
+#    define STRAP_HAVE_TM_GMTOFF 0
+#endif
+
 #if defined(__APPLE__) || defined(__FreeBSD__)
 #    include <xlocale.h>
 #endif
@@ -64,6 +81,245 @@ static int strap_check_add_overflow(size_t a, size_t b)
 static int strap_check_mul_overflow(size_t a, size_t b)
 {
     return (a != 0 && b > SIZE_MAX / a);
+}
+
+#define STRAP_LINE_BUFFER_DEFAULT_CAPACITY 256
+
+static unsigned char strap_ascii_tolower(unsigned char ch)
+{
+    if (ch >= 'A' && ch <= 'Z')
+        return (unsigned char)(ch + ('a' - 'A'));
+    return ch;
+}
+
+static void strap_split_free_partial(char **tokens, size_t count)
+{
+    if (!tokens)
+        return;
+    for (size_t i = 0; i < count; ++i)
+        free(tokens[i]);
+    free(tokens);
+}
+
+static int strap_split_reserve(char ***tokens_ptr, size_t *capacity, size_t needed, size_t max_tokens)
+{
+    if (needed <= *capacity)
+        return 0;
+
+    size_t new_capacity = *capacity;
+    if (max_tokens > 0)
+    {
+        if (needed > max_tokens)
+        {
+            errno = EOVERFLOW;
+            strap_set_error(STRAP_ERR_OVERFLOW);
+            return -1;
+        }
+        new_capacity = max_tokens;
+    }
+    else
+    {
+        if (new_capacity == 0)
+            new_capacity = 4;
+        while (new_capacity < needed)
+        {
+            if (new_capacity > SIZE_MAX / 2)
+            {
+                errno = EOVERFLOW;
+                strap_set_error(STRAP_ERR_OVERFLOW);
+                return -1;
+            }
+            new_capacity *= 2;
+        }
+    }
+
+    if (strap_check_add_overflow(new_capacity, 1) ||
+        strap_check_mul_overflow(new_capacity + 1, sizeof(char *)))
+    {
+        errno = EOVERFLOW;
+        strap_set_error(STRAP_ERR_OVERFLOW);
+        return -1;
+    }
+
+    char **resized = realloc(*tokens_ptr, (new_capacity + 1) * sizeof(char *));
+    if (!resized)
+    {
+        errno = ENOMEM;
+        strap_set_error(STRAP_ERR_ALLOC);
+        return -1;
+    }
+
+    *tokens_ptr = resized;
+    *capacity = new_capacity;
+    return 0;
+}
+
+#if STRAP_HAVE_SSE2
+static unsigned strap_ctz16(unsigned mask)
+{
+#    if defined(_MSC_VER)
+    unsigned long idx;
+    _BitScanForward(&idx, mask);
+    return (unsigned)idx;
+#    else
+    return (unsigned)__builtin_ctz(mask);
+#    endif
+}
+
+static unsigned strap_highest_bit_index16(unsigned mask)
+{
+#    if defined(_MSC_VER)
+    unsigned long idx;
+    _BitScanReverse(&idx, mask);
+    return (unsigned)idx;
+#    else
+    return 31U - (unsigned)__builtin_clz(mask);
+#    endif
+}
+
+static size_t strap_trim_leading_ascii_simd(const unsigned char *s, size_t len)
+{
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i space_limit = _mm_set1_epi8(' ');
+    size_t offset = 0;
+
+    while (offset + 16 <= len)
+    {
+        __m128i chunk = _mm_loadu_si128((const __m128i *)(s + offset));
+        int non_ascii = _mm_movemask_epi8(_mm_cmplt_epi8(chunk, zero));
+        if (non_ascii)
+            return SIZE_MAX;
+
+        __m128i above_space = _mm_cmpgt_epi8(chunk, space_limit);
+        int stop_mask = _mm_movemask_epi8(above_space);
+        if (stop_mask)
+        {
+            unsigned idx = strap_ctz16(stop_mask);
+            return offset + idx;
+        }
+        offset += 16;
+    }
+
+    while (offset < len)
+    {
+        unsigned char c = s[offset];
+        if (c > 0x7F)
+            return SIZE_MAX;
+        if (c > ' ')
+            return offset;
+        ++offset;
+    }
+
+    return len;
+}
+
+static size_t strap_trim_trailing_ascii_simd(const unsigned char *s, size_t len)
+{
+    if (len == 0)
+        return 0;
+
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i space_limit = _mm_set1_epi8(' ');
+    size_t offset = len;
+
+    while (offset >= 16)
+    {
+        size_t chunk_start = offset - 16;
+        __m128i chunk = _mm_loadu_si128((const __m128i *)(s + chunk_start));
+        int non_ascii = _mm_movemask_epi8(_mm_cmplt_epi8(chunk, zero));
+        if (non_ascii)
+            return SIZE_MAX;
+
+        __m128i above_space = _mm_cmpgt_epi8(chunk, space_limit);
+        int mask = _mm_movemask_epi8(above_space);
+        if (mask)
+        {
+            unsigned idx = strap_highest_bit_index16(mask);
+            return chunk_start + idx + 1;
+        }
+        offset -= 16;
+    }
+
+    while (offset > 0)
+    {
+        unsigned char c = s[offset - 1];
+        if (c > 0x7F)
+            return SIZE_MAX;
+        if (c > ' ')
+            return offset;
+        --offset;
+    }
+
+    return 0;
+}
+#else
+static size_t strap_trim_leading_ascii_simd(const unsigned char *s, size_t len)
+{
+    (void)s;
+    (void)len;
+    return SIZE_MAX;
+}
+
+static size_t strap_trim_trailing_ascii_simd(const unsigned char *s, size_t len)
+{
+    (void)s;
+    (void)len;
+    return SIZE_MAX;
+}
+#endif
+
+static void strap_copy_bytes(char *dst, const char *src, size_t len)
+{
+    if (!dst || !src || len == 0)
+        return;
+
+#if STRAP_HAVE_SSE2
+    size_t i = 0;
+    for (; i + 16 <= len; i += 16)
+    {
+        __m128i chunk = _mm_loadu_si128((const __m128i *)(src + i));
+        _mm_storeu_si128((__m128i *)(dst + i), chunk);
+    }
+
+    size_t remaining = len - i;
+    if (remaining > 0)
+        memcpy(dst + i, src + i, remaining);
+#else
+    memcpy(dst, src, len);
+#endif
+}
+
+static int strap_line_buffer_reserve(strap_line_buffer_t *buffer, size_t needed)
+{
+    if (buffer->capacity >= needed)
+        return 0;
+
+    size_t new_capacity = buffer->capacity;
+    if (new_capacity == 0)
+        new_capacity = STRAP_LINE_BUFFER_DEFAULT_CAPACITY;
+
+    while (new_capacity < needed)
+    {
+        if (new_capacity > SIZE_MAX / 2)
+        {
+            errno = EOVERFLOW;
+            strap_set_error(STRAP_ERR_OVERFLOW);
+            return -1;
+        }
+        new_capacity *= 2;
+    }
+
+    char *resized = realloc(buffer->data, new_capacity);
+    if (!resized)
+    {
+        errno = ENOMEM;
+        strap_set_error(STRAP_ERR_ALLOC);
+        return -1;
+    }
+
+    buffer->data = resized;
+    buffer->capacity = new_capacity;
+    return 0;
 }
 
 /* --------------------------------------------------------------------- */
@@ -266,77 +522,83 @@ static int strap_toupper_locale_ctx(int ch, const strap_locale_ctx *ctx)
 
 
 /* Safe reading */
-char *afgets(FILE *f)
+void strap_line_buffer_init(strap_line_buffer_t *buffer)
 {
-    if (!f)
+    if (!buffer)
+    {
+        errno = EINVAL;
+        strap_set_error(STRAP_ERR_INVALID_ARGUMENT);
+        return;
+    }
+
+    buffer->data = NULL;
+    buffer->capacity = 0;
+    strap_clear_error();
+}
+
+void strap_line_buffer_free(strap_line_buffer_t *buffer)
+{
+    if (!buffer)
+    {
+        errno = EINVAL;
+        strap_set_error(STRAP_ERR_INVALID_ARGUMENT);
+        return;
+    }
+
+    free(buffer->data);
+    buffer->data = NULL;
+    buffer->capacity = 0;
+}
+
+char *strap_line_buffer_read(FILE *f, strap_line_buffer_t *buffer)
+{
+    if (!f || !buffer)
     {
         errno = EINVAL;
         strap_set_error(STRAP_ERR_INVALID_ARGUMENT);
         return NULL;
     }
 
-    size_t capacity = 128;
     size_t len = 0;
-    char *line = malloc(capacity);
-    if (!line)
+    if (buffer->capacity == 0)
     {
-        errno = ENOMEM;
-        strap_set_error(STRAP_ERR_ALLOC);
-        return NULL;
+        if (strap_line_buffer_reserve(buffer, STRAP_LINE_BUFFER_DEFAULT_CAPACITY) != 0)
+            return NULL;
+    }
+    else
+    {
+        buffer->data[0] = '\0';
     }
 
     for (;;)
     {
-        if (capacity - len <= 1)
+        if (buffer->capacity - len <= 1)
         {
-            if (capacity > SIZE_MAX / 2)
-            {
-                free(line);
-                errno = EOVERFLOW;
-                strap_set_error(STRAP_ERR_OVERFLOW);
+            size_t target = len + STRAP_LINE_BUFFER_DEFAULT_CAPACITY;
+            if (strap_line_buffer_reserve(buffer, target) != 0)
                 return NULL;
-            }
-            size_t new_capacity = capacity * 2;
-            char *tmp = realloc(line, new_capacity);
-            if (!tmp)
-            {
-                free(line);
-                errno = ENOMEM;
-                strap_set_error(STRAP_ERR_ALLOC);
-                return NULL;
-            }
-            line = tmp;
-            capacity = new_capacity;
         }
 
-        if (!fgets(line + len, (int)(capacity - len), f))
+        if (!fgets(buffer->data + len, (int)(buffer->capacity - len), f))
             break;
 
-        size_t chunk_len = strlen(line + len);
-        char *newline = memchr(line + len, '\n', chunk_len);
+        size_t chunk_len = strlen(buffer->data + len);
+        char *newline = memchr(buffer->data + len, '\n', chunk_len);
         if (newline)
         {
             *newline = '\0';
             strap_clear_error();
-            return line;
+            return buffer->data;
         }
 
         len += chunk_len;
-
-        if (feof(f))
-        {
-            strap_clear_error();
-            return line;
-        }
     }
 
-    if (len > 0)
+    if (len > 0 && buffer->data)
     {
         strap_clear_error();
-        return line;
+        return buffer->data;
     }
-
-    free(line);
 
     if (ferror(f))
     {
@@ -349,6 +611,39 @@ char *afgets(FILE *f)
     }
 
     return NULL;
+}
+
+char *afgets(FILE *f)
+{
+    if (!f)
+    {
+        errno = EINVAL;
+        strap_set_error(STRAP_ERR_INVALID_ARGUMENT);
+        return NULL;
+    }
+
+    strap_line_buffer_t buffer;
+    strap_line_buffer_init(&buffer);
+
+    char *inplace = strap_line_buffer_read(f, &buffer);
+    if (!inplace)
+    {
+        strap_line_buffer_free(&buffer);
+        return NULL;
+    }
+
+    char *result = strdup(inplace);
+    strap_line_buffer_free(&buffer);
+
+    if (!result)
+    {
+        errno = ENOMEM;
+        strap_set_error(STRAP_ERR_ALLOC);
+        return NULL;
+    }
+
+    strap_clear_error();
+    return result;
 }
 
 char *afread(FILE *f, size_t *out_len)
@@ -663,14 +958,14 @@ static char *strjoin_impl(strap_arena_t *arena, const char **parts, size_t npart
     {
         if (i > 0 && sep_len > 0)
         {
-            memcpy(write_ptr, sep, sep_len);
+            strap_copy_bytes(write_ptr, sep, sep_len);
             write_ptr += sep_len;
         }
 
         size_t part_len = lengths[i];
         if (part_len > 0 && parts[i])
         {
-            memcpy(write_ptr, parts[i], part_len);
+            strap_copy_bytes(write_ptr, parts[i], part_len);
             write_ptr += part_len;
         }
     }
@@ -741,6 +1036,318 @@ char *strjoin_va(const char *sep, ...)
     return result;
 }
 
+static int strap_strcasecmp_internal(const char *a, const char *b)
+{
+    const unsigned char *ua = (const unsigned char *)a;
+    const unsigned char *ub = (const unsigned char *)b;
+
+    while (*ua && *ub)
+    {
+        unsigned char ca = strap_ascii_tolower(*ua);
+        unsigned char cb = strap_ascii_tolower(*ub);
+        if (ca != cb)
+            return (int)ca - (int)cb;
+        ++ua;
+        ++ub;
+    }
+
+    return (int)strap_ascii_tolower(*ua) - (int)strap_ascii_tolower(*ub);
+}
+
+int strap_strcasecmp(const char *a, const char *b)
+{
+    if (!a || !b)
+    {
+        errno = EINVAL;
+        strap_set_error(STRAP_ERR_INVALID_ARGUMENT);
+        return 0;
+    }
+
+    int diff = strap_strcasecmp_internal(a, b);
+    strap_clear_error();
+    return diff;
+}
+
+bool strcaseeq(const char *a, const char *b)
+{
+    if (!a || !b)
+    {
+        errno = EINVAL;
+        strap_set_error(STRAP_ERR_INVALID_ARGUMENT);
+        return false;
+    }
+
+    bool equal = (strap_strcasecmp_internal(a, b) == 0);
+    strap_clear_error();
+    return equal;
+}
+
+char **strsplit_limit(const char *s, const char *delim, size_t max_splits, size_t *out_count)
+{
+    if (!s || !delim)
+    {
+        errno = EINVAL;
+        strap_set_error(STRAP_ERR_INVALID_ARGUMENT);
+        return NULL;
+    }
+
+    size_t delim_len = strlen(delim);
+    if (delim_len == 0)
+    {
+        errno = EINVAL;
+        strap_set_error(STRAP_ERR_INVALID_ARGUMENT);
+        return NULL;
+    }
+
+    size_t max_tokens = 0;
+    if (max_splits > 0)
+    {
+        if (strap_check_add_overflow(max_splits, 1))
+        {
+            errno = EOVERFLOW;
+            strap_set_error(STRAP_ERR_OVERFLOW);
+            return NULL;
+        }
+        max_tokens = max_splits + 1;
+    }
+
+    size_t capacity = max_tokens > 0 ? max_tokens : 4;
+    if (strap_check_add_overflow(capacity, 1) ||
+        strap_check_mul_overflow(capacity + 1, sizeof(char *)))
+    {
+        errno = EOVERFLOW;
+        strap_set_error(STRAP_ERR_OVERFLOW);
+        return NULL;
+    }
+
+    char **tokens = malloc((capacity + 1) * sizeof(char *));
+    if (!tokens)
+    {
+        errno = ENOMEM;
+        strap_set_error(STRAP_ERR_ALLOC);
+        return NULL;
+    }
+
+    size_t count = 0;
+    size_t splits = 0;
+    const char *cursor = s;
+
+    for (;;)
+    {
+        if (max_splits > 0 && splits >= max_splits)
+        {
+            char *tail = strdup(cursor);
+            if (!tail)
+            {
+                errno = ENOMEM;
+                strap_set_error(STRAP_ERR_ALLOC);
+                strap_split_free_partial(tokens, count);
+                return NULL;
+            }
+
+            if (strap_split_reserve(&tokens, &capacity, count + 1, max_tokens) != 0)
+            {
+                free(tail);
+                strap_split_free_partial(tokens, count);
+                return NULL;
+            }
+
+            tokens[count++] = tail;
+            break;
+        }
+
+        const char *match = strstr(cursor, delim);
+        if (!match)
+        {
+            size_t tail_len = strlen(cursor);
+            char *tail = malloc(tail_len + 1);
+            if (!tail)
+            {
+                errno = ENOMEM;
+                strap_set_error(STRAP_ERR_ALLOC);
+                strap_split_free_partial(tokens, count);
+                return NULL;
+            }
+            memcpy(tail, cursor, tail_len + 1);
+
+            if (strap_split_reserve(&tokens, &capacity, count + 1, max_tokens) != 0)
+            {
+                free(tail);
+                strap_split_free_partial(tokens, count);
+                return NULL;
+            }
+
+            tokens[count++] = tail;
+            break;
+        }
+
+        size_t segment_len = (size_t)(match - cursor);
+        char *segment = malloc(segment_len + 1);
+        if (!segment)
+        {
+            errno = ENOMEM;
+            strap_set_error(STRAP_ERR_ALLOC);
+            strap_split_free_partial(tokens, count);
+            return NULL;
+        }
+
+        if (segment_len > 0)
+            memcpy(segment, cursor, segment_len);
+        segment[segment_len] = '\0';
+
+        if (strap_split_reserve(&tokens, &capacity, count + 1, max_tokens) != 0)
+        {
+            free(segment);
+            strap_split_free_partial(tokens, count);
+            return NULL;
+        }
+
+        tokens[count++] = segment;
+        cursor = match + delim_len;
+        ++splits;
+    }
+
+    if (strap_split_reserve(&tokens, &capacity, count, max_tokens) != 0)
+    {
+        strap_split_free_partial(tokens, count);
+        return NULL;
+    }
+
+    tokens[count] = NULL;
+    if (out_count)
+        *out_count = count;
+
+    strap_clear_error();
+    return tokens;
+}
+
+char **strsplit_predicate(const char *s,
+                          strap_split_predicate_fn predicate,
+                          void *userdata,
+                          size_t max_splits,
+                          size_t *out_count)
+{
+    if (!s || !predicate)
+    {
+        errno = EINVAL;
+        strap_set_error(STRAP_ERR_INVALID_ARGUMENT);
+        return NULL;
+    }
+
+    size_t max_tokens = 0;
+    if (max_splits > 0)
+    {
+        if (strap_check_add_overflow(max_splits, 1))
+        {
+            errno = EOVERFLOW;
+            strap_set_error(STRAP_ERR_OVERFLOW);
+            return NULL;
+        }
+        max_tokens = max_splits + 1;
+    }
+
+    size_t capacity = max_tokens > 0 ? max_tokens : 4;
+    if (strap_check_add_overflow(capacity, 1) ||
+        strap_check_mul_overflow(capacity + 1, sizeof(char *)))
+    {
+        errno = EOVERFLOW;
+        strap_set_error(STRAP_ERR_OVERFLOW);
+        return NULL;
+    }
+
+    char **tokens = malloc((capacity + 1) * sizeof(char *));
+    if (!tokens)
+    {
+        errno = ENOMEM;
+        strap_set_error(STRAP_ERR_ALLOC);
+        return NULL;
+    }
+
+    size_t count = 0;
+    size_t splits = 0;
+    size_t pos = 0;
+    const unsigned char *buffer = (const unsigned char *)s;
+
+    while (buffer[pos] != '\0')
+    {
+        while (buffer[pos] != '\0' && predicate(buffer[pos], userdata))
+            ++pos;
+        if (buffer[pos] == '\0')
+            break;
+
+        if (max_splits > 0 && splits >= max_splits)
+        {
+            char *tail = strdup((const char *)&buffer[pos]);
+            if (!tail)
+            {
+                errno = ENOMEM;
+                strap_set_error(STRAP_ERR_ALLOC);
+                strap_split_free_partial(tokens, count);
+                return NULL;
+            }
+
+            if (strap_split_reserve(&tokens, &capacity, count + 1, max_tokens) != 0)
+            {
+                free(tail);
+                strap_split_free_partial(tokens, count);
+                return NULL;
+            }
+
+            tokens[count++] = tail;
+            pos += strlen((const char *)&buffer[pos]);
+            break;
+        }
+
+        size_t start = pos;
+        while (buffer[pos] != '\0' && !predicate(buffer[pos], userdata))
+            ++pos;
+
+        size_t token_len = pos - start;
+        char *token = malloc(token_len + 1);
+        if (!token)
+        {
+            errno = ENOMEM;
+            strap_set_error(STRAP_ERR_ALLOC);
+            strap_split_free_partial(tokens, count);
+            return NULL;
+        }
+
+        if (token_len > 0)
+            memcpy(token, &buffer[start], token_len);
+        token[token_len] = '\0';
+
+        if (strap_split_reserve(&tokens, &capacity, count + 1, max_tokens) != 0)
+        {
+            free(token);
+            strap_split_free_partial(tokens, count);
+            return NULL;
+        }
+
+        tokens[count++] = token;
+
+        if (buffer[pos] == '\0')
+            break;
+
+        ++splits;
+    }
+
+    tokens[count] = NULL;
+    if (out_count)
+        *out_count = count;
+
+    strap_clear_error();
+    return tokens;
+}
+
+void strsplit_free(char **tokens)
+{
+    if (!tokens)
+        return;
+    for (size_t i = 0; tokens[i] != NULL; ++i)
+        free(tokens[i]);
+    free(tokens);
+}
+
 /* Trim */
 static char *strtrim_impl(strap_arena_t *arena, const char *s)
 {
@@ -751,13 +1358,40 @@ static char *strtrim_impl(strap_arena_t *arena, const char *s)
         return NULL;
     }
 
-    const unsigned char *start = (const unsigned char *)s;
-    while (*start && isspace(*start))
-        ++start;
+    const unsigned char *bytes = (const unsigned char *)s;
+    size_t total_len = strlen(s);
 
-    size_t len = strlen((const char *)start);
-    while (len > 0 && isspace(start[len - 1]))
-        --len;
+    size_t leading = strap_trim_leading_ascii_simd(bytes, total_len);
+    const unsigned char *start = bytes;
+
+    if (leading == SIZE_MAX)
+    {
+        leading = 0;
+        while (leading < total_len && isspace((unsigned char)start[0]))
+        {
+            ++start;
+            ++leading;
+        }
+    }
+    else
+    {
+        start += leading;
+    }
+
+    size_t remaining_len = total_len - leading;
+    size_t trimmed_len = strap_trim_trailing_ascii_simd(start, remaining_len);
+    size_t len;
+
+    if (trimmed_len == SIZE_MAX)
+    {
+        len = remaining_len;
+        while (len > 0 && isspace((unsigned char)start[len - 1]))
+            --len;
+    }
+    else
+    {
+        len = trimmed_len;
+    }
 
     if (strap_check_add_overflow(len, 1))
     {
@@ -1201,6 +1835,24 @@ static int strap_gmtime_safe(time_t value, struct tm *out)
 #endif
 }
 
+static int strap_localtime_safe(time_t value, struct tm *out)
+{
+    if (!out)
+        return -1;
+
+#if defined(_WIN32)
+    return localtime_s(out, &value) == 0 ? 0 : -1;
+#elif defined(_POSIX_THREAD_SAFE_FUNCTIONS) || defined(__unix__) || defined(__APPLE__)
+    return localtime_r(&value, out) ? 0 : -1;
+#else
+    struct tm *tmp = localtime(&value);
+    if (!tmp)
+        return -1;
+    *out = *tmp;
+    return 0;
+#endif
+}
+
 static int strap_is_leap(int year)
 {
     return ((year % 4 == 0) && (year % 100 != 0)) || (year % 400 == 0);
@@ -1526,6 +2178,74 @@ int strap_time_format_iso8601(struct timeval t, int offset_minutes, char *buf, s
 
     strap_clear_error();
     return 0;
+}
+
+int strap_time_local_offset(time_t when, int *offset_minutes)
+{
+    if (!offset_minutes)
+    {
+        errno = EINVAL;
+        strap_set_error(STRAP_ERR_INVALID_ARGUMENT);
+        return -1;
+    }
+
+    struct tm local_tm;
+    if (strap_localtime_safe(when, &local_tm) != 0)
+    {
+        errno = EINVAL;
+        strap_set_error(STRAP_ERR_INVALID_ARGUMENT);
+        return -1;
+    }
+
+    int64_t offset_seconds;
+
+#if STRAP_HAVE_TM_GMTOFF
+    offset_seconds = (int64_t)local_tm.tm_gmtoff;
+#else
+    struct tm probe = local_tm;
+    time_t local_epoch = mktime(&probe);
+    if (local_epoch == (time_t)-1)
+    {
+        errno = EINVAL;
+        strap_set_error(STRAP_ERR_INVALID_ARGUMENT);
+        return -1;
+    }
+    offset_seconds = (int64_t)local_epoch - (int64_t)when;
+#endif
+
+    if (offset_seconds < -14LL * 3600 || offset_seconds > 14LL * 3600)
+    {
+        errno = ERANGE;
+        strap_set_error(STRAP_ERR_OVERFLOW);
+        return -1;
+    }
+
+    if (offset_seconds % 60 != 0)
+    {
+        errno = EINVAL;
+        strap_set_error(STRAP_ERR_INVALID_ARGUMENT);
+        return -1;
+    }
+
+    int candidate = (int)(offset_seconds / 60);
+    if ((int64_t)candidate != offset_seconds / 60)
+    {
+        errno = ERANGE;
+        strap_set_error(STRAP_ERR_OVERFLOW);
+        return -1;
+    }
+
+    *offset_minutes = candidate;
+    strap_clear_error();
+    return 0;
+}
+
+int strap_time_format_iso8601_local(struct timeval t, char *buf, size_t bufsize)
+{
+    int offset_minutes;
+    if (strap_time_local_offset(t.tv_sec, &offset_minutes) != 0)
+        return -1;
+    return strap_time_format_iso8601(t, offset_minutes, buf, bufsize);
 }
 
 static int strap_parse_fixed_digits(const char **cursor, size_t count, int *out_value)

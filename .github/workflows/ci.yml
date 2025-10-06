@@ -23,11 +23,15 @@ jobs:
       run: |
         make
 
+    - name: Configure on Windows
+      if: runner.os == 'Windows'
+      run: |
+        cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DSTRAP_BUILD_TESTS=ON -DSTRAP_BUILD_BENCHMARKS=OFF -DCMAKE_BUILD_TYPE=Release
+
     - name: Build on Windows
       if: runner.os == 'Windows'
       run: |
-        gcc -Wall -Wextra -O2 -c strap.c -o strap.o
-        ar rcs libstrap.a strap.o
+        cmake --build build --config Release
 
     - name: Run tests on Linux/macOS
       if: runner.os != 'Windows'
@@ -39,9 +43,7 @@ jobs:
     - name: Run tests on Windows
       if: runner.os == 'Windows'
       run: |
-        cd tests
-        gcc -I.. -L.. -o test_strap.exe test_strap.c -lstrap
-        ./test_strap.exe
+        ctest --test-dir build --config Release --output-on-failure
 
   release:
     needs: build

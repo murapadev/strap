@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <assert.h>
 
 void test_strtrim()
@@ -54,6 +55,40 @@ void test_strtrim_inplace()
     printf("strtrim_inplace tests passed\n");
 }
 
+void test_strtrim_simd_prototype()
+{
+    size_t prefix = 128;
+    size_t suffix = 200;
+    const char *payload = "SIMD hot path!";
+    size_t payload_len = strlen(payload);
+    size_t total = prefix + payload_len + suffix + 1;
+
+    char *input = malloc(total);
+    assert(input);
+
+    memset(input, ' ', prefix);
+    memcpy(input + prefix, payload, payload_len);
+    memset(input + prefix + payload_len, '\t', suffix);
+    input[total - 1] = '\0';
+
+    strap_clear_error();
+    char *trimmed = strtrim(input);
+    assert(trimmed);
+    assert(strcmp(trimmed, payload) == 0);
+    assert(strap_last_error() == STRAP_OK);
+
+    free(trimmed);
+    free(input);
+
+    strap_clear_error();
+    const char utf8_whitespace[] = "\xC2\xA0hello\xC2\xA0"; /* non-breaking spaces */
+    char *trimmed_utf8 = strtrim(utf8_whitespace);
+    assert(trimmed_utf8 && strcmp(trimmed_utf8, utf8_whitespace) == 0);
+    free(trimmed_utf8);
+
+    printf("strtrim SIMD prototype tests passed\n");
+}
+
 void test_strjoin()
 {
     strap_clear_error();
@@ -72,10 +107,51 @@ void test_strjoin()
     printf("strjoin tests passed\n");
 }
 
+void test_strjoin_simd_copy()
+{
+    const size_t part_len = 512;
+    char *a = malloc(part_len + 1);
+    char *b = malloc(part_len + 1);
+    char *c = malloc(part_len + 1);
+    assert(a && b && c);
+
+    memset(a, 'A', part_len);
+    memset(b, 'B', part_len);
+    memset(c, 'C', part_len);
+    a[part_len] = '\0';
+    b[part_len] = '\0';
+    c[part_len] = '\0';
+
+    const char *parts[] = {a, b, c};
+
+    strap_clear_error();
+    char *joined = strjoin(parts, 3, "|");
+    assert(joined);
+
+    size_t expected_len = part_len * 3 + 2;
+    assert(strlen(joined) == expected_len);
+    for (size_t i = 0; i < part_len; ++i)
+        assert(joined[i] == 'A');
+    assert(joined[part_len] == '|');
+    for (size_t i = 0; i < part_len; ++i)
+        assert(joined[part_len + 1 + i] == 'B');
+    assert(joined[part_len * 2 + 1] == '|');
+    for (size_t i = 0; i < part_len; ++i)
+        assert(joined[part_len * 2 + 2 + i] == 'C');
+    assert(strap_last_error() == STRAP_OK);
+
+    free(joined);
+    free(a);
+    free(b);
+    free(c);
+
+    printf("strjoin SIMD prototype tests passed\n");
+}
+
 void test_strjoin_va()
 {
     strap_clear_error();
-    char *result = strjoin_va(" ", "hello", "world", NULL);
+   char *result = strjoin_va(" ", "hello", "world", NULL);
     assert(result && strcmp(result, "hello world") == 0);
     assert(strap_last_error() == STRAP_OK);
     free(result);
@@ -151,6 +227,163 @@ void test_strreplace()
     assert(strap_last_error() == STRAP_ERR_INVALID_ARGUMENT);
 
     printf("strreplace tests passed\n");
+}
+
+void test_line_buffer()
+{
+    strap_clear_error();
+    strap_line_buffer_init(NULL);
+    assert(strap_last_error() == STRAP_ERR_INVALID_ARGUMENT);
+
+    FILE *tmp = tmpfile();
+    assert(tmp);
+
+    fputs("first line\n", tmp);
+
+    char long_line[600];
+    for (int i = 0; i < 512; ++i)
+        long_line[i] = (char)('A' + (i % 26));
+    long_line[512] = '\0';
+    fputs(long_line, tmp);
+    fputc('\n', tmp);
+    fputs("trailing-no-newline", tmp);
+    fflush(tmp);
+    rewind(tmp);
+
+    strap_line_buffer_t buffer;
+    strap_line_buffer_init(&buffer);
+    assert(strap_last_error() == STRAP_OK);
+
+    char *line = strap_line_buffer_read(tmp, &buffer);
+    assert(line && strcmp(line, "first line") == 0);
+    char *buffer_ptr = line;
+    assert(strap_last_error() == STRAP_OK);
+
+    line = strap_line_buffer_read(tmp, &buffer);
+    assert(line == buffer_ptr);
+    assert(strcmp(line, long_line) == 0);
+    assert(strap_last_error() == STRAP_OK);
+
+    line = strap_line_buffer_read(tmp, &buffer);
+    assert(line == buffer_ptr);
+    assert(strcmp(line, "trailing-no-newline") == 0);
+    assert(strap_last_error() == STRAP_OK);
+
+    line = strap_line_buffer_read(tmp, &buffer);
+    assert(line == NULL);
+    assert(strap_last_error() == STRAP_OK);
+
+    strap_line_buffer_free(&buffer);
+    fclose(tmp);
+
+    printf("strap_line_buffer tests passed\n");
+}
+
+void test_strsplit_limit()
+{
+    strap_clear_error();
+    size_t count = 0;
+    char **tokens = strsplit_limit("alpha,beta,gamma", ",", 1, &count);
+    assert(tokens && count == 2);
+    assert(strcmp(tokens[0], "alpha") == 0);
+    assert(strcmp(tokens[1], "beta,gamma") == 0);
+    assert(strap_last_error() == STRAP_OK);
+    strsplit_free(tokens);
+
+    strap_clear_error();
+    tokens = strsplit_limit("a,,b", ",", 0, &count);
+    assert(tokens && count == 3);
+    assert(strcmp(tokens[0], "a") == 0);
+    assert(strcmp(tokens[1], "") == 0);
+    assert(strcmp(tokens[2], "b") == 0);
+    assert(strap_last_error() == STRAP_OK);
+    strsplit_free(tokens);
+
+    strap_clear_error();
+    tokens = strsplit_limit("", ",", 0, &count);
+    assert(tokens && count == 1);
+    assert(strcmp(tokens[0], "") == 0);
+    assert(strap_last_error() == STRAP_OK);
+    strsplit_free(tokens);
+
+    strap_clear_error();
+    tokens = strsplit_limit("anything", "", 0, &count);
+    assert(tokens == NULL);
+    assert(strap_last_error() == STRAP_ERR_INVALID_ARGUMENT);
+
+    printf("strsplit_limit tests passed\n");
+}
+
+static bool split_whitespace(unsigned char ch, void *userdata)
+{
+    (void)userdata;
+    return ch == ' ' || ch == '\t' || ch == '\n';
+}
+
+void test_strsplit_predicate()
+{
+    strap_clear_error();
+    size_t count = 0;
+    char **tokens = strsplit_predicate("  foo\tbar baz  ", split_whitespace, NULL, 0, &count);
+    assert(tokens && count == 3);
+    assert(strcmp(tokens[0], "foo") == 0);
+    assert(strcmp(tokens[1], "bar") == 0);
+    assert(strcmp(tokens[2], "baz") == 0);
+    assert(strap_last_error() == STRAP_OK);
+    strsplit_free(tokens);
+
+    strap_clear_error();
+    tokens = strsplit_predicate("one two   three four", split_whitespace, NULL, 2, &count);
+    assert(tokens && count == 3);
+    assert(strcmp(tokens[0], "one") == 0);
+    assert(strcmp(tokens[1], "two") == 0);
+    assert(strcmp(tokens[2], "three four") == 0);
+    assert(strap_last_error() == STRAP_OK);
+    strsplit_free(tokens);
+
+    strap_clear_error();
+    tokens = strsplit_predicate("", split_whitespace, NULL, 0, &count);
+    assert(tokens && count == 0);
+    assert(strap_last_error() == STRAP_OK);
+    strsplit_free(tokens);
+
+    strap_clear_error();
+    tokens = strsplit_predicate("noop", NULL, NULL, 0, &count);
+    assert(tokens == NULL);
+    assert(strap_last_error() == STRAP_ERR_INVALID_ARGUMENT);
+
+    printf("strsplit_predicate tests passed\n");
+}
+
+void test_strcasecmp_helpers()
+{
+    strap_clear_error();
+    assert(strap_strcasecmp("Hello", "hello") == 0);
+    assert(strap_last_error() == STRAP_OK);
+
+    strap_clear_error();
+    assert(strap_strcasecmp("abc", "abd") < 0);
+    assert(strap_last_error() == STRAP_OK);
+
+    strap_clear_error();
+    assert(!strcaseeq("abc", "xyz"));
+    assert(strap_last_error() == STRAP_OK);
+
+    strap_clear_error();
+    assert(strcaseeq("STRAP", "strap"));
+    assert(strap_last_error() == STRAP_OK);
+
+    strap_clear_error();
+    bool ok = strcaseeq(NULL, "strap");
+    assert(!ok);
+    assert(strap_last_error() == STRAP_ERR_INVALID_ARGUMENT);
+
+    strap_clear_error();
+    int cmp = strap_strcasecmp(NULL, "x");
+    assert(cmp == 0);
+    assert(strap_last_error() == STRAP_ERR_INVALID_ARGUMENT);
+
+    printf("strap_strcasecmp/strcaseeq tests passed\n");
 }
 
 void test_timeval()
@@ -267,16 +500,53 @@ void test_timezone_helpers()
     printf("timezone helper tests passed\n");
 }
 
+void test_time_local_offset_helpers()
+{
+    strap_clear_error();
+    time_t now = time(NULL);
+    int offset_minutes = 0;
+    assert(strap_time_local_offset(now, &offset_minutes) == 0);
+    assert(offset_minutes >= -14 * 60 && offset_minutes <= 14 * 60);
+    assert(strap_last_error() == STRAP_OK);
+
+    struct timeval sample = {now, 123456};
+    char buf[64];
+    strap_clear_error();
+    assert(strap_time_format_iso8601_local(sample, buf, sizeof(buf)) == 0);
+    assert(strap_last_error() == STRAP_OK);
+
+    struct timeval parsed;
+    int parsed_offset = 0;
+    strap_clear_error();
+    assert(strap_time_parse_iso8601(buf, &parsed, &parsed_offset) == 0);
+    assert(parsed.tv_sec == sample.tv_sec);
+    assert(parsed.tv_usec == sample.tv_usec);
+    assert(parsed_offset == offset_minutes);
+
+    strap_clear_error();
+    assert(strap_time_local_offset(now, NULL) == -1);
+    assert(strap_last_error() == STRAP_ERR_INVALID_ARGUMENT);
+
+    printf("time local offset helpers tests passed\n");
+}
+
 int main()
 {
     test_strtrim();
     test_strtrim_inplace();
+    test_strtrim_simd_prototype();
     test_strjoin();
+    test_strjoin_simd_copy();
     test_strjoin_va();
     test_strstartswith_and_strendswith();
     test_strreplace();
+    test_line_buffer();
+    test_strsplit_limit();
+    test_strsplit_predicate();
+    test_strcasecmp_helpers();
     test_timeval();
     test_locale_helpers();
+    test_time_local_offset_helpers();
     test_arena_allocator();
     test_timezone_helpers();
 

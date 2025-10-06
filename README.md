@@ -12,6 +12,7 @@ A small, efficient C library providing missing utilities for safe and comfortabl
 - **[🚀 Quick Start Guide](../../wiki/Quick-Start)** - Get up and running in minutes
 - **[📋 API Reference](../../wiki/API-Reference)** - Detailed function documentation
 - **[💡 Examples](../../wiki/Examples)** - Code examples and use cases
+- **[🧰 Cookbook](../../wiki/Cookbook)** - Practical recipes for common tasks
 
 ## 🚀 Quick Start
 
@@ -28,6 +29,17 @@ sudo make install
 make bench
 ./benchmarks/strap_bench
 ```
+
+### Windows (MSVC + CMake)
+
+```powershell
+# From a Visual Studio Developer Command Prompt
+git clone https://github.com/murapadev/strap.git
+cd strap
+scripts\build_windows_msvc.bat Release
+```
+
+The helper script configures the Visual Studio generator via CMake, builds the static library, and runs the unit tests. Adjust the generator string or build type inside the script to match your environment.
 
 ## 🔔 What's New in v0.2
 
@@ -96,6 +108,21 @@ Call `strap_clear_error()` when you want to reset the status manually.
 - [x] Extended locale-aware helpers
 - [x] Optional arena allocator for transient strings
 - [x] Timezone-aware time helpers
+
+### v0.4 (Upcoming)
+
+- [x] Additional performance optimizations
+  - [x] SIMD-accelerated paths for common hot functions (`strtrim`, `strjoin`)
+  - [x] Streaming-friendly buffering for `afgets` and file helpers (`strap_line_buffer_read`)
+- [x] Extended string manipulation utilities
+  - [x] High-level split helpers with delimiter limits and predicates (`strsplit_limit`, `strsplit_predicate`)
+  - [x] Case-insensitive comparison helpers (`strap_strcasecmp`, `strcaseeq`)
+- [x] Cross-platform improvements
+  - [x] Official Windows/MSVC build scripts and CI coverage
+  - [x] Locale/timezone shims for BSD and musl-targeted systems
+- [x] Enhanced documentation
+  - [x] Cookbook-style guides for common patterns (log parsing, CSV wrangling)
+  - [x] API reference refresh with usage notes and complexity details
 
 ## 📄 License
 
