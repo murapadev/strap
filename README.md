@@ -96,20 +96,20 @@ Call `strap_clear_error()` when you want to reset the status manually.
 
 ## 🗺️ Roadmap
 
-### v0.2 (Current) ✅
+### v0.2
 
 - [x] Performance optimizations
 - [x] Additional string utilities
 - [x] Enhanced error handling
 - [x] Benchmark suite
 
-### v0.3 (In Progress)
+### v0.3
 
 - [x] Extended locale-aware helpers
 - [x] Optional arena allocator for transient strings
 - [x] Timezone-aware time helpers
 
-### v0.4 (Upcoming)
+### v0.4 (Current) ✅
 
 - [x] Additional performance optimizations
   - [x] SIMD-accelerated paths for common hot functions (`strtrim`, `strjoin`)
