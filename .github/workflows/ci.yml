@@ -43,7 +43,7 @@ jobs:
     - name: Run tests on Windows
       if: runner.os == 'Windows'
       run: |
-        ctest --test-dir build --config Release --output-on-failure
+        ctest --test-dir build --build-config Release --output-on-failure
 
   release:
     needs: build
